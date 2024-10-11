@@ -60,7 +60,7 @@ func (s grpcUploadsServer) ClaimFile(ctx context.Context, req *pb.ClaimFileReq) 
 	// Return file details
 	return &pb.ClaimFileResp{
 		Id:       f.Id,
-		Mime:     objInfo.ContentType,
+		Mime:     f.Mime,
 		Filename: f.Filename,
 		Size:     objInfo.Size,
 		Width:    int32(f.Width),
