@@ -7,5 +7,5 @@ RUN go build -o /Meower-Uploads
 
 # Production stage
 FROM ubuntu:24.04
-COPY --from=builder /app/Meower-Uploads /Meower-Uploads
+COPY --from=builder /Meower-Uploads /Meower-Uploads
 ENTRYPOINT ["/Meower-Uploads"]
