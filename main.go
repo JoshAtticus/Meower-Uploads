@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"time"
@@ -22,10 +21,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
-
-	grpcUploads "github.com/meower-media-co/Meower-Uploads/grpc_uploads"
 )
 
 var ctx context.Context = context.Background()
@@ -55,7 +50,10 @@ func main() {
 
 	// Ping MongoDB
 	var result bson.M
-	if err := client.Database("admin").RunCommand(context.TODO(), bson.D{{Key: "ping", Value: 1}}).Decode(&result); err != nil {
+	if err := client.Database("admin").RunCommand(
+		context.TODO(),
+		bson.D{{Key: "ping", Value: 1}},
+	).Decode(&result); err != nil {
 		log.Fatalln(err)
 	}
 
@@ -106,36 +104,15 @@ func main() {
 		s3RegionOrder = append(s3RegionOrder, name)
 	}
 
-	if os.Getenv("PRIMARY_NODE") == "1" {
-		/*/ Run migrations
-		if err := runMigrations(); err != nil {
-			log.Fatalln(err)
-		}*/
-
-		// Files cleanup
-		go func() {
-			for {
-				time.Sleep(time.Minute)
-				if err := cleanupFiles(); err != nil {
-					sentry.CaptureException(err)
-				}
+	// Files cleanup
+	go func() {
+		for {
+			time.Sleep(time.Minute)
+			if err := cleanupFiles(); err != nil {
+				sentry.CaptureException(err)
 			}
-		}()
-
-		// Start gRPC Uploads service
-		go func() {
-			lis, err := net.Listen("tcp", os.Getenv("GRPC_UPLOADS_ADDRESS"))
-			if err != nil {
-				log.Fatalln(err)
-			}
-			s := grpc.NewServer()
-			reflection.Register(s)
-			grpcUploads.RegisterUploadsServer(s, grpcUploadsServer{})
-			if err := s.Serve(lis); err != nil {
-				log.Fatalln(err)
-			}
-		}()
-	}
+		}
+	}()
 
 	// Create HTTP router
 	r := chi.NewRouter()
@@ -148,7 +125,6 @@ func main() {
 	r.Post("/{bucket:icons|emojis|stickers|attachments}", uploadFile)
 	r.Get("/{bucket:icons|emojis|stickers|attachments}/{id}", downloadFile)
 	r.Get("/{bucket:icons|emojis|stickers|attachments}/{id}/*", downloadFile)
-	r.Get("/data-exports/{id}", downloadDataExport)
 
 	// Send Sentry message
 	sentry.CaptureMessage("Starting uploads service")

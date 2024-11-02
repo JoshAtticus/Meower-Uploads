@@ -3,7 +3,6 @@ module github.com/meower-media-co/Meower-Uploads
 go 1.21.3
 
 require (
-	github.com/discord/lilliput v0.0.0-20240201002527-adc97f85f75a
 	github.com/getsentry/sentry-go v0.27.0
 	github.com/go-chi/chi/v5 v5.0.10
 	github.com/joho/godotenv v1.5.1
@@ -11,8 +10,6 @@ require (
 	github.com/redis/go-redis/v9 v9.4.0
 	github.com/rs/cors v1.10.1
 	go.mongodb.org/mongo-driver v1.17.0
-	google.golang.org/grpc v1.63.2
-	google.golang.org/protobuf v1.33.0
 )
 
 require (
@@ -40,6 +37,5 @@ require (
 	golang.org/x/sync v0.8.0 // indirect
 	golang.org/x/sys v0.23.0 // indirect
 	golang.org/x/text v0.17.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240227224415-6ceb2ff114de // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )

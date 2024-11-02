@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -49,22 +50,17 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read file
-	fileBytes, err := io.ReadAll(file)
+	// Ingest file
+	f, err := IngestMultipartFile(chi.URLParam(r, "bucket"), file, header, user)
 	if err != nil {
-		sentry.CaptureException(err)
-		http.Error(w, "Failed to read file", http.StatusInternalServerError)
-		return
-	}
-
-	// Create file
-	f, err := CreateFile(chi.URLParam(r, "bucket"), fileBytes, header.Filename, header.Header.Get("Content-Type"), user.Username)
-	if err != nil {
-		if err == ErrFileBlocked {
+		if err == ErrUnsupportedFile {
+			http.Error(w, "Unsupported file format", http.StatusForbidden)
+		} else if err == ErrFileBlocked {
 			http.Error(w, "File blocked", http.StatusForbidden)
 		} else {
+			log.Println(err)
 			sentry.CaptureException(err)
-			http.Error(w, "Failed to create file", http.StatusInternalServerError)
+			http.Error(w, "Failed to ingest file", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -99,31 +95,34 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get object
-	var obj *minio.Object
-	var objInfo *minio.ObjectInfo
-	if r.URL.Query().Has("preview") && f.Bucket == "attachments" {
-		obj, objInfo, err = f.GetPreviewObject()
-	} else {
-		obj, objInfo, err = f.GetObject()
+	var thumbnail bool
+	if strings.HasPrefix(f.Mime, "image/") && (r.URL.Query().Has("thumbnail") || r.URL.Query().Has("preview")) {
+		thumbnail = true
+	} else if strings.HasPrefix(f.Mime, "video/") && r.URL.Query().Has("thumbnail") {
+		thumbnail = true
 	}
+	obj, err := f.GetObject(thumbnail)
 	if err != nil {
 		sentry.CaptureException(err)
 		http.Error(w, "Failed to get object", http.StatusInternalServerError)
 		return
-	} else {
-		obj.Seek(0, 0)
 	}
 
 	// Set response headers
-	w.Header().Set("Content-Type", objInfo.ContentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
+	if thumbnail {
+		w.Header().Set("Content-Type", f.ThumbnailMime)
+	} else {
+		w.Header().Set("Content-Type", f.Mime)
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(f.Size, 10))
 	w.Header().Set("ETag", f.Id)
 	w.Header().Set("Cache-Control", "pbulic, max-age=31536000") // 1 year cache (files should never change)
 	filename := chi.URLParam(r, "*")
 	if filename == "" {
 		filename = f.Id
 	}
-	if r.URL.Query().Has("download") {
+	isMedia := strings.HasPrefix(f.Mime, "image/") || strings.HasPrefix(f.Mime, "video/") || strings.HasPrefix(f.Mime, "audio/")
+	if r.URL.Query().Has("download") || !isMedia {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%s`, filename))
 	} else {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=%s`, filename))
@@ -133,45 +132,7 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
 	_, err = io.Copy(w, obj)
 	if err != nil {
 		sentry.CaptureException(err)
-		http.Error(w, "Failed to send object", http.StatusInternalServerError)
-		return
-	}
-}
-
-func downloadDataExport(w http.ResponseWriter, r *http.Request) {
-	// Get object info
-	objInfo, err := s3Clients[s3RegionOrder[0]].StatObject(ctx, "data-exports", chi.URLParam(r, "id"), minio.StatObjectOptions{})
-	if err != nil {
-		http.Error(w, "Not found", http.StatusNotFound)
-		return
-	}
-
-	// Get & check token details
-	user, err := getUserByToken(r.URL.Query().Get("t"))
-	if err != nil || user.Username != objInfo.UserMetadata["User-Id"] {
-		sentry.CaptureException(err)
-		http.Error(w, "Invalid or missing token", http.StatusUnauthorized)
-		return
-	}
-
-	// Get object
-	obj, err := s3Clients[s3RegionOrder[0]].GetObject(ctx, "data-exports", chi.URLParam(r, "id"), minio.GetObjectOptions{})
-	if err != nil {
-		sentry.CaptureException(err)
-		http.Error(w, "Failed to get object", http.StatusInternalServerError)
-		return
-	}
-
-	// Set response headers
-	w.Header().Set("Content-Type", objInfo.ContentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
-	w.Header().Set("Cache-Control", "none") // do not cache
-	w.Header().Set("Content-Disposition", "attachment; filename=meower_export.zip")
-
-	// Copy the object data into the response body
-	_, err = io.Copy(w, obj)
-	if err != nil {
-		sentry.CaptureException(err)
+		log.Println(err)
 		http.Error(w, "Failed to send object", http.StatusInternalServerError)
 		return
 	}
