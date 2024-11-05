@@ -23,11 +23,11 @@ type File struct {
 	Hash          string `bson:"hash" json:"-"`
 	Bucket        string `bson:"bucket" json:"-"`
 	Mime          string `bson:"mime" json:"mime"`
-	ThumbnailMime string `bson:"thumbnail_mime,omitempty" json:"-"`
+	ThumbnailMime string `bson:"thumbnail_mime,omitempty" json:"thumbnail_mime,omitempty"`
 	Size          int64  `bson:"size" json:"size"`
-	Filename      string `bson:"filename,omitempty" json:"filename"`
-	Width         int    `bson:"width,omitempty" json:"width"`
-	Height        int    `bson:"height,omitempty" json:"height"`
+	Filename      string `bson:"filename,omitempty" json:"filename,omitempty"`
+	Width         int    `bson:"width,omitempty" json:"width,omitempty"`
+	Height        int    `bson:"height,omitempty" json:"height,omitempty"`
 
 	UploadRegion string `bson:"upload_region" json:"-"`
 	UploadedBy   string `bson:"uploaded_by" json:"-"`
@@ -46,8 +46,8 @@ func IngestMultipartFile(
 	var f File
 	var wg sync.WaitGroup
 	var err error
-	var id, hashHex, mime, thumbnailMime, frames string
-	var width, height int
+	var id, hashHex string
+	var info minio.UploadInfo
 
 	// Create file ID
 	id, err = generateId()
@@ -132,6 +132,17 @@ func IngestMultipartFile(
 		f.UploadedBy = uploader.Username
 		f.UploadedAt = time.Now().Unix()
 	} else {
+		// Create file details
+		f = File{
+			Id:           id,
+			Hash:         hashHex,
+			Bucket:       bucket,
+			Filename:     cleanFilename(fileHeader.Filename),
+			UploadRegion: s3RegionOrder[0],
+			UploadedBy:   uploader.Username,
+			UploadedAt:   time.Now().Unix(),
+		}
+
 		// Get mime
 		out, err = exec.Command(
 			"file",
@@ -142,18 +153,15 @@ func IngestMultipartFile(
 			sentry.CaptureException(err)
 			return nil, err
 		}
-		mime = strings.Fields(string(out))[1]
-
-		// Init MinIO upload info var
-		var info minio.UploadInfo
+		f.Mime = strings.Fields(string(out))[1]
 
 		// Get dimensions and number of frames, if it is an image
-		if strings.HasPrefix(mime, "image/") {
+		if strings.HasPrefix(f.Mime, "image/") {
 			out, err = exec.Command(
 				"magick",
 				"identify",
 				"-format",
-				"%w,%h,%n",
+				"%w,%h",
 				fmt.Sprint(ingestDir, "/original"),
 			).Output()
 			if err != nil {
@@ -161,23 +169,36 @@ func IngestMultipartFile(
 				return nil, err
 			}
 			outSlice := strings.Split(string(out), ",")
-			width, _ = strconv.Atoi(outSlice[0])
-			height, _ = strconv.Atoi(outSlice[1])
-			frames = outSlice[2]
+			f.Width, _ = strconv.Atoi(outSlice[0])
+			f.Height, _ = strconv.Atoi(outSlice[1])
 		}
 
 		if bucket == "icons" || bucket == "emojis" || bucket == "stickers" {
 			// Make sure the file is an image
-			if !strings.HasPrefix(mime, "image/") {
+			if !strings.HasPrefix(f.Mime, "image/") {
 				return nil, ErrUnsupportedFile
 			}
 
+			// Get frames
+			out, err = exec.Command(
+				"magick",
+				"identify",
+				"-format",
+				"%n",
+				fmt.Sprint(ingestDir, "/original"),
+			).Output()
+			if err != nil {
+				sentry.CaptureException(err)
+				return nil, err
+			}
+			frames := string(out)
+
 			// Choose format to convert to and update mime
 			format := "webp"
-			mime = "image/webp"
+			f.Mime = "image/webp"
 			if frames != "1" {
 				format = "gif"
-				mime = "image/gif"
+				f.Mime = "image/gif"
 			}
 
 			// If one of the axis is less than n, use that size rather than n
@@ -190,10 +211,10 @@ func IngestMultipartFile(
 			case "stickers":
 				desiredSize = 384
 			}
-			if width < desiredSize {
-				desiredSize = width
-			} else if height < desiredSize {
-				desiredSize = height
+			if f.Width < desiredSize {
+				desiredSize = f.Width
+			} else if f.Height < desiredSize {
+				desiredSize = f.Height
 			}
 
 			// Remove Exif, optimize, and resize
@@ -226,6 +247,7 @@ func IngestMultipartFile(
 						ContentType: fmt.Sprint("image/", format),
 					},
 				)
+				f.Size = info.Size
 			}()
 
 			// Get new width and height
@@ -240,13 +262,13 @@ func IngestMultipartFile(
 					fmt.Sprint(ingestDir, "/.", format),
 				).Output()
 				outSlice := strings.Split(string(out), ",")
-				width, _ = strconv.Atoi(outSlice[0])
-				height, _ = strconv.Atoi(outSlice[1])
+				f.Width, _ = strconv.Atoi(outSlice[0])
+				f.Height, _ = strconv.Atoi(outSlice[1])
 			}()
 
 			wg.Wait()
 		} else if bucket == "attachments" {
-			if strings.HasPrefix(mime, "image") { // Images
+			if strings.HasPrefix(f.Mime, "image") { // Images
 				// Remove Exif and optimize
 				err = exec.Command(
 					"magick",
@@ -272,52 +294,17 @@ func IngestMultipartFile(
 						hashHex,
 						fmt.Sprint(ingestDir, "/optimized"),
 						minio.PutObjectOptions{
-							ContentType: mime,
+							ContentType: f.Mime,
 						},
 					)
+					f.Size = info.Size
 				}()
 
-				// Create thumbnail and upload to bucket
+				// Generate thumbnail
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-
-					// Choose format to use for the thumbnail
-					format := "webp"
-					thumbnailMime = "image/webp"
-					if frames != "1" {
-						format = "gif"
-						thumbnailMime = "image/gif"
-					}
-
-					// Use largest axis that is smaller than 480px
-					var desiredSize int
-					if width > height {
-						desiredSize = width
-					} else {
-						desiredSize = height
-					}
-					if desiredSize > 480 {
-						desiredSize = 480
-					}
-
-					err = exec.Command(
-						"magick",
-						fmt.Sprint(ingestDir, "/optimized"),
-						"-resize",
-						fmt.Sprint(desiredSize, "x", desiredSize),
-						fmt.Sprint(ingestDir, "/thumbnail.", format),
-					).Run()
-
-					_, err = s3Clients[s3RegionOrder[0]].FPutObject(
-						ctx,
-						bucket,
-						fmt.Sprint(hashHex, "_thumbnail"),
-						fmt.Sprint(ingestDir, "/thumbnail.", format),
-						minio.PutObjectOptions{
-							ContentType: fmt.Sprint("image/", format),
-						},
-					)
+					err = f.GenerateThumbnail()
 				}()
 
 				wg.Wait()
@@ -326,7 +313,7 @@ func IngestMultipartFile(
 					sentry.CaptureException(err)
 					return nil, err
 				}
-			} else if strings.HasPrefix(mime, "video") { // Videos
+			} else if strings.HasPrefix(f.Mime, "video") { // Videos
 				// Start uploading video to bucket
 				wg.Add(1)
 				go func() {
@@ -337,9 +324,10 @@ func IngestMultipartFile(
 						hashHex,
 						fmt.Sprint(ingestDir, "/original"),
 						minio.PutObjectOptions{
-							ContentType: mime,
+							ContentType: f.Mime,
 						},
 					)
+					f.Size = info.Size
 				}()
 
 				// Get first frame
@@ -373,44 +361,14 @@ func IngestMultipartFile(
 					return nil, err
 				}
 				outSlice := strings.Split(string(out), ",")
-				width, _ = strconv.Atoi(outSlice[0])
-				height, _ = strconv.Atoi(outSlice[1])
+				f.Width, _ = strconv.Atoi(outSlice[0])
+				f.Height, _ = strconv.Atoi(outSlice[1])
 
-				// Create thumbnail and upload to bucket
+				// Generate thumbnail
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-
-					// Use largest axis that is smaller than 480px
-					var desiredSize int
-					if width > height {
-						desiredSize = width
-					} else {
-						desiredSize = height
-					}
-					if desiredSize > 480 {
-						desiredSize = 480
-					}
-
-					err = exec.Command(
-						"magick",
-						fmt.Sprint(ingestDir, "/first_frame.jpg"),
-						"-resize",
-						fmt.Sprint(desiredSize, "x", desiredSize),
-						fmt.Sprint(ingestDir, "/thumbnail.webp"),
-					).Run()
-
-					_, err = s3Clients[s3RegionOrder[0]].FPutObject(
-						ctx,
-						bucket,
-						fmt.Sprint(hashHex, "_thumbnail"),
-						fmt.Sprint(ingestDir, "/thumbnail.webp"),
-						minio.PutObjectOptions{
-							ContentType: "image/webp",
-						},
-					)
-
-					thumbnailMime = "image/webp"
+					err = f.GenerateThumbnail()
 				}()
 
 				wg.Wait()
@@ -426,30 +384,15 @@ func IngestMultipartFile(
 					hashHex,
 					fmt.Sprint(ingestDir, "/original"),
 					minio.PutObjectOptions{
-						ContentType: mime,
+						ContentType: f.Mime,
 					},
 				)
 				if err != nil {
 					sentry.CaptureException(err)
 					return nil, err
 				}
+				f.Size = info.Size
 			}
-		}
-
-		// Create file details
-		f = File{
-			Id:            id,
-			Hash:          hashHex,
-			Bucket:        bucket,
-			Mime:          mime,
-			ThumbnailMime: thumbnailMime,
-			Size:          info.Size,
-			Filename:      cleanFilename(fileHeader.Filename),
-			Width:         width,
-			Height:        height,
-			UploadRegion:  s3RegionOrder[0],
-			UploadedBy:    uploader.Username,
-			UploadedAt:    time.Now().Unix(),
 		}
 	}
 
@@ -473,9 +416,141 @@ func GetFile(id string) (File, error) {
 	return f, err
 }
 
+func (f *File) GenerateThumbnail() error {
+	// Create directory in ingest directory for temporary files
+	// And download file for processing
+	ingestDir := fmt.Sprint(os.Getenv("INGEST_DIR"), "/", f.Id)
+	if _, err := os.Stat(ingestDir); os.IsNotExist(err) {
+		defer os.RemoveAll(ingestDir)
+		if err := os.Mkdir(ingestDir, 0700); err != nil {
+			sentry.CaptureException(err)
+			return err
+		}
+
+		obj, err := f.GetObject(false)
+		if err != nil {
+			sentry.CaptureException(err)
+			return err
+		}
+
+		dst, err := os.Create(fmt.Sprint(ingestDir, "/original"))
+		if err != nil {
+			sentry.CaptureException(err)
+			return err
+		}
+		defer dst.Close()
+		if _, err := io.Copy(dst, obj); err != nil {
+			sentry.CaptureException(err)
+			return err
+		}
+	}
+
+	// Choose format to use for the thumbnail
+	format := "webp"
+	if strings.HasPrefix(f.Mime, "image/") { // use GIF for animated images
+		out, err := exec.Command(
+			"magick",
+			"identify",
+			"-format",
+			"%n",
+			fmt.Sprint(ingestDir, "/original"),
+		).Output()
+		if err != nil {
+			sentry.CaptureException(err)
+			return err
+		}
+		frames := string(out)
+		if frames != "1" {
+			format = "gif"
+		}
+	}
+
+	// Use largest axis that is smaller than 480px
+	var desiredSize int
+	if f.Width > f.Height {
+		desiredSize = f.Width
+	} else {
+		desiredSize = f.Height
+	}
+	if desiredSize > 480 {
+		desiredSize = 480
+	}
+
+	// Get first frame if it's a video
+	if strings.HasPrefix(f.Mime, "video/") {
+		if _, err := os.Stat(fmt.Sprint(ingestDir, "/first_frame.jpg")); os.IsNotExist(err) {
+			if err := exec.Command(
+				"ffmpeg",
+				"-i",
+				fmt.Sprint(ingestDir, "/original"),
+				"-vf",
+				"select=eq(n\\,0)",
+				"-vsync",
+				"vfr",
+				"-q:v",
+				"2",
+				fmt.Sprint(ingestDir, "/first_frame.jpg"),
+			).Run(); err != nil {
+				sentry.CaptureException(err)
+				return err
+			}
+		}
+	}
+
+	// Create thumbnail
+	fp := fmt.Sprint(ingestDir, "/original")
+	if strings.HasPrefix(f.Mime, "video/") {
+		fp = fmt.Sprint(ingestDir, "/first_frame.jpg")
+	}
+	if err := exec.Command(
+		"magick",
+		fp,
+		"-resize",
+		fmt.Sprint(desiredSize, "x", desiredSize),
+		fmt.Sprint(ingestDir, "/thumbnail.", format),
+	).Run(); err != nil {
+		sentry.CaptureException(err)
+		return err
+	}
+
+	// Upload thumbnail
+	if _, err := s3Clients[s3RegionOrder[0]].FPutObject(
+		ctx,
+		f.Bucket,
+		fmt.Sprint(f.Hash, "_thumbnail"),
+		fmt.Sprint(ingestDir, "/thumbnail.", format),
+		minio.PutObjectOptions{
+			ContentType: fmt.Sprint("image/", format),
+		},
+	); err != nil {
+		sentry.CaptureException(err)
+		return err
+	}
+
+	// Update file details
+	f.ThumbnailMime = fmt.Sprint("image/", format)
+	if _, err := db.Collection("files").UpdateMany(
+		context.TODO(),
+		bson.M{"hash": f.Hash, "bucket": f.Bucket},
+		bson.M{"$set": bson.M{"thumbnail_mime": f.ThumbnailMime}},
+	); err != nil {
+		sentry.CaptureException(err)
+		return err
+	}
+
+	return nil
+}
+
 func (f *File) GetObject(thumbnail bool) (*minio.Object, error) {
 	objName := f.Hash
-	if thumbnail && (strings.HasPrefix(f.Mime, "image/") || strings.HasPrefix(f.Mime, "video/")) {
+	if thumbnail && f.Bucket == "attachments" && (strings.HasPrefix(f.Mime, "image/") || strings.HasPrefix(f.Mime, "video/")) {
+		// Generate thumbnail if one doesn't exist yet
+		if f.ThumbnailMime == "" {
+			if err := f.GenerateThumbnail(); err != nil {
+				return nil, err
+			}
+		}
+
 		objName += "_thumbnail"
 	}
 
