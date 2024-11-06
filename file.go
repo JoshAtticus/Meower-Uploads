@@ -24,6 +24,7 @@ type File struct {
 	Bucket        string `bson:"bucket" json:"-"`
 	Mime          string `bson:"mime" json:"mime"`
 	ThumbnailMime string `bson:"thumbnail_mime,omitempty" json:"thumbnail_mime,omitempty"`
+	ThumbnailSize int64  `bson:"thumbnail_size,omitempty" json:"thumbnail_size,omitempty"`
 	Size          int64  `bson:"size" json:"size"`
 	Filename      string `bson:"filename,omitempty" json:"filename,omitempty"`
 	Width         int    `bson:"width,omitempty" json:"width,omitempty"`
@@ -514,7 +515,7 @@ func (f *File) GenerateThumbnail() error {
 	}
 
 	// Upload thumbnail
-	if _, err := s3Clients[s3RegionOrder[0]].FPutObject(
+	uploadInfo, err := s3Clients[s3RegionOrder[0]].FPutObject(
 		ctx,
 		f.Bucket,
 		fmt.Sprint(f.Hash, "_thumbnail"),
@@ -522,17 +523,22 @@ func (f *File) GenerateThumbnail() error {
 		minio.PutObjectOptions{
 			ContentType: fmt.Sprint("image/", format),
 		},
-	); err != nil {
+	)
+	if err != nil {
 		sentry.CaptureException(err)
 		return err
 	}
 
 	// Update file details
 	f.ThumbnailMime = fmt.Sprint("image/", format)
+	f.ThumbnailSize = uploadInfo.Size
 	if _, err := db.Collection("files").UpdateMany(
 		context.TODO(),
 		bson.M{"hash": f.Hash, "bucket": f.Bucket},
-		bson.M{"$set": bson.M{"thumbnail_mime": f.ThumbnailMime}},
+		bson.M{"$set": bson.M{
+			"thumbnail_mime": f.ThumbnailMime,
+			"thumbnail_size": f.ThumbnailSize,
+		}},
 	); err != nil {
 		sentry.CaptureException(err)
 		return err
@@ -545,7 +551,7 @@ func (f *File) GetObject(thumbnail bool) (*minio.Object, error) {
 	objName := f.Hash
 	if thumbnail && f.Bucket == "attachments" && (strings.HasPrefix(f.Mime, "image/") || strings.HasPrefix(f.Mime, "video/")) {
 		// Generate thumbnail if one doesn't exist yet
-		if f.ThumbnailMime == "" {
+		if f.ThumbnailMime == "" || f.ThumbnailSize == 0 {
 			if err := f.GenerateThumbnail(); err != nil {
 				return nil, err
 			}
