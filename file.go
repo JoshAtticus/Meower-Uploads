@@ -132,6 +132,7 @@ func IngestMultipartFile(
 		f.Filename = cleanFilename(fileHeader.Filename)
 		f.UploadedBy = uploader.Username
 		f.UploadedAt = time.Now().Unix()
+		f.Claimed = false
 	} else {
 		// Create file details
 		f = File{
