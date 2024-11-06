@@ -101,7 +101,7 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasPrefix(f.Mime, "video/") && r.URL.Query().Has("thumbnail") {
 		thumbnail = true
 	}
-	obj, err := f.GetObject(thumbnail)
+	obj, objInfo, err := f.GetObject(thumbnail)
 	if err != nil {
 		sentry.CaptureException(err)
 		http.Error(w, "Failed to get object", http.StatusInternalServerError)
@@ -111,11 +111,10 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
 	// Set response headers
 	if thumbnail {
 		w.Header().Set("Content-Type", f.ThumbnailMime)
-		w.Header().Set("Content-Length", strconv.FormatInt(f.ThumbnailSize, 10))
 	} else {
 		w.Header().Set("Content-Type", f.Mime)
-		w.Header().Set("Content-Length", strconv.FormatInt(f.Size, 10))
 	}
+	w.Header().Set("Content-Length", strconv.FormatInt(objInfo.Size, 10))
 	w.Header().Set("ETag", f.Id)
 	w.Header().Set("Cache-Control", "pbulic, max-age=31536000") // 1 year cache (files should never change)
 	filename := chi.URLParam(r, "*")

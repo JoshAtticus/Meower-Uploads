@@ -24,8 +24,8 @@ type File struct {
 	Bucket        string `bson:"bucket" json:"-"`
 	Mime          string `bson:"mime" json:"mime"`
 	ThumbnailMime string `bson:"thumbnail_mime,omitempty" json:"thumbnail_mime,omitempty"`
-	ThumbnailSize int64  `bson:"thumbnail_size,omitempty" json:"thumbnail_size,omitempty"`
 	Size          int64  `bson:"size" json:"size"`
+	ThumbnailSize int64  `bson:"thumbnail_size,omitempty" json:"thumbnail_size,omitempty"`
 	Filename      string `bson:"filename,omitempty" json:"filename,omitempty"`
 	Width         int    `bson:"width,omitempty" json:"width,omitempty"`
 	Height        int    `bson:"height,omitempty" json:"height,omitempty"`
@@ -428,7 +428,7 @@ func (f *File) GenerateThumbnail() error {
 			return err
 		}
 
-		obj, err := f.GetObject(false)
+		obj, _, err := f.GetObject(false)
 		if err != nil {
 			sentry.CaptureException(err)
 			return err
@@ -547,25 +547,42 @@ func (f *File) GenerateThumbnail() error {
 	return nil
 }
 
-func (f *File) GetObject(thumbnail bool) (*minio.Object, error) {
+func (f *File) GetObject(thumbnail bool) (*minio.Object, *minio.ObjectInfo, error) {
 	objName := f.Hash
 	if thumbnail && f.Bucket == "attachments" && (strings.HasPrefix(f.Mime, "image/") || strings.HasPrefix(f.Mime, "video/")) {
 		// Generate thumbnail if one doesn't exist yet
 		if f.ThumbnailMime == "" || f.ThumbnailSize == 0 {
 			if err := f.GenerateThumbnail(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
 		objName += "_thumbnail"
 	}
 
-	return s3Clients[s3RegionOrder[0]].GetObject(
+	// Get object
+	obj, err := s3Clients[s3RegionOrder[0]].GetObject(
 		ctx,
 		f.Bucket,
 		objName,
 		minio.GetObjectOptions{},
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Get object info (used for size)
+	objInfo, err := s3Clients[s3RegionOrder[0]].StatObject(
+		ctx,
+		f.Bucket,
+		objName,
+		minio.StatObjectOptions{},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return obj, &objInfo, nil
 }
 
 func (f *File) Delete() error {
