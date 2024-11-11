@@ -227,8 +227,8 @@ func IngestMultipartFile(
 				"90",
 				"-resize",
 				fmt.Sprint(desiredSize, "x", desiredSize),
-				"+profile",
-				"\"*\"",
+				"-auto-orient",
+				"-strip",
 				fmt.Sprint(ingestDir, "/.", format),
 			).Run()
 			if err != nil {
@@ -277,8 +277,8 @@ func IngestMultipartFile(
 					fmt.Sprint(ingestDir, "/original"),
 					"-quality",
 					"90",
-					"+profile",
-					"\"*\"",
+					"-auto-orient",
+					"-strip",
 					fmt.Sprint(ingestDir, "/optimized"),
 				).Run()
 				if err != nil {
