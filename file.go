@@ -14,6 +14,7 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/minio/minio-go/v7"
+	"github.com/vmihailenco/msgpack/v5"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -396,6 +397,18 @@ func IngestMultipartFile(
 				f.Size = info.Size
 			}
 		}
+	}
+
+	// Send to files automod
+	marshaledEvent, err := msgpack.Marshal(map[string]interface{}{
+		"type":        0,
+		"username":    f.UploadedBy,
+		"file_bucket": f.Bucket,
+		"file_hashes": []string{f.Hash},
+	})
+	if err := rdb.Publish(context.TODO(), "automod:files", marshaledEvent).Err(); err != nil {
+		fmt.Println(err)
+		sentry.CaptureException(err)
 	}
 
 	// Create database item
